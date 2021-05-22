@@ -1,9 +1,11 @@
 export const ATTACK = "attack";
 export const ATTACK_POWER = 30;
+export const BODYPART_COST = { move: 50, work: 100, attack: 80, carry: 50, heal: 250, ranged_attack: 150, tough: 10 };
 export const BODYPART_HITS = 100;
 export const BOTTOM = 5;
 export const BOTTOM_LEFT = 6;
 export const BOTTOM_RIGHT = 4;
+export const BUILD_POWER = 5;
 export class BodyPart extends RoomObject {
   get type() {
     if (!this.exists) {
@@ -27,6 +29,56 @@ export class BodyPart extends RoomObject {
 }
 export const CARRY = "carry";
 export const CARRY_CAPACITY = 50;
+export const CONSTRUCTION_COST = { StructureTower: 5000, StructureExtension: 300 };
+export const CONSTRUCTION_COST_ROAD_SWAMP_RATIO = 5;
+export const CONSTRUCTION_COST_ROAD_WALL_RATIO = 150;
+export const CONTAINER_CAPACITY = 2000;
+export const CONTAINER_HITS = 300;
+export const CREEP_SPAWN_TIME = 3;
+export class ConstructionSite extends RoomObject {
+  get progress() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].progress;
+  }
+  get progressTotal() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].progressTotal;
+  }
+  get structurePrototypeNam() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].structurePrototypeNam;
+  }
+  get my() {
+    if (!this.exists) {
+      return;
+    }
+    if (SystemStore.roomObjectsData[this.id].user) {
+      return SystemStore.roomObjectsData[this.id].user === SystemStore.playerName;
+    }
+    return undefined;
+  }
+  toJSON() {
+    return Object.assign(super.toJSON(), {
+      progress: this.progress,
+      progressTotal: this.progressTotal,
+      my: this.my,
+      structure: this.structure
+    });
+  }
+  remove() {
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    Intents.set(this.id, "remove", {});
+    return C.OK;
+  }
+}
 export class CostMatrix {
   constructor() {
     this._bits = new Uint8Array(SystemStore.arenaSize * SystemStore.arenaSize);
@@ -94,6 +146,10 @@ export class Creep extends RoomObject {
       return;
     }
     return SystemStore.roomObjectsData[this.id].body;
+  }
+
+  get store() {
+    return new Store(SystemStore.roomObjectsData[this.id]);
   }
 
   toJSON() {
@@ -263,7 +319,258 @@ export class Creep extends RoomObject {
     Intents.set(this.id, "pull", { id: target.id });
     return C.OK;
   }
+
+  withdraw(target, resourceType, amount) {
+    if (!this.exists) {
+      return;
+    }
+
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (amount < 0) {
+      return C.ERR_INVALID_ARGS;
+    }
+    if (!C.RESOURCES_ALL.includes(resourceType)) {
+      return C.ERR_INVALID_ARGS;
+    }
+
+    if (!target || !target.id || !SystemStore.roomObjectsData[target.id].store || !(target instanceof Structure)) {
+      return C.ERR_INVALID_TARGET;
+    }
+
+    if (
+      !capacityForResource(SystemStore.roomObjectsData[target.id], resourceType) &&
+      !SystemStore.roomObjectsData[target.id].store[resourceType]
+    ) {
+      return C.ERR_INVALID_TARGET;
+    }
+
+    if (this.getRangeTo(target) > 1) {
+      return C.ERR_NOT_IN_RANGE;
+    }
+
+    const emptySpace =
+      SystemStore.roomObjectsData[this.id].storeCapacity - sumObjectValues(SystemStore.roomObjectsData[this.id].store);
+
+    if (emptySpace <= 0) {
+      return C.ERR_FULL;
+    }
+
+    if (!amount) {
+      amount = Math.min(emptySpace, SystemStore.roomObjectsData[target.id].store[resourceType]);
+    }
+
+    if (amount > emptySpace) {
+      return C.ERR_FULL;
+    }
+
+    if (!amount || (SystemStore.roomObjectsData[target.id].store[resourceType] || 0) < amount) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+
+    Intents.set(this.id, "withdraw", { id: target.id, amount, resourceType });
+    return C.OK;
+  }
+
+  transfer(target, resourceType, amount) {
+    if (!this.exists) {
+      return;
+    }
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (amount < 0) {
+      return C.ERR_INVALID_ARGS;
+    }
+    if (!C.RESOURCES_ALL.includes(resourceType)) {
+      return C.ERR_INVALID_ARGS;
+    }
+    if (
+      !target ||
+      !target.id ||
+      !SystemStore.roomObjectsData[target.id].store ||
+      (target instanceof Creep && target.spawning) ||
+      (!(target instanceof Structure) && !(target instanceof Creep))
+    ) {
+      return C.ERR_INVALID_TARGET;
+    }
+
+    if (!capacityForResource(SystemStore.roomObjectsData[target.id], resourceType)) {
+      return C.ERR_INVALID_TARGET;
+    }
+
+    if (this.getRangeTo(target) > 1) {
+      return C.ERR_NOT_IN_RANGE;
+    }
+    if (!SystemStore.roomObjectsData[this.id].store || !SystemStore.roomObjectsData[this.id].store[resourceType]) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+
+    const storedAmount = SystemStore.roomObjectsData[target.id].storeCapacityResource
+      ? SystemStore.roomObjectsData[target.id].store[resourceType] || 0
+      : sumObjectValues(SystemStore.roomObjectsData[target.id].store);
+    const targetCapacity = capacityForResource(SystemStore.roomObjectsData[target.id], resourceType);
+
+    if (!SystemStore.roomObjectsData[target.id].store || storedAmount >= targetCapacity) {
+      return C.ERR_FULL;
+    }
+
+    if (!amount) {
+      amount = Math.min(SystemStore.roomObjectsData[this.id].store[resourceType], targetCapacity - storedAmount);
+    }
+
+    if (SystemStore.roomObjectsData[this.id].store[resourceType] < amount) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+
+    if (amount + storedAmount > targetCapacity) {
+      return C.ERR_FULL;
+    }
+
+    Intents.set(this.id, "transfer", { id: target.id, amount, resourceType });
+    return C.OK;
+  }
+
+  harvest(target) {
+    if (!this.exists) {
+      return;
+    }
+
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (!this.body.some(p => p.type === C.WORK && p.hits > 0)) {
+      return C.ERR_NO_BODYPART;
+    }
+    if (!target || !target.id || !(target instanceof Source)) {
+      return C.ERR_INVALID_TARGET;
+    }
+
+    if (!target.energy) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+    if (this.getRangeTo(target) > 1) {
+      return C.ERR_NOT_IN_RANGE;
+    }
+
+    Intents.set(this.id, "harvest", { id: target.id });
+    return C.OK;
+  }
+
+  drop(resourceType, amount) {
+    if (!this.exists) {
+      return;
+    }
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (!C.RESOURCES_ALL.includes(resourceType)) {
+      return C.ERR_INVALID_ARGS;
+    }
+    if (!SystemStore.roomObjectsData[this.id].store || !SystemStore.roomObjectsData[this.id].store[resourceType]) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+    if (!amount) {
+      amount = SystemStore.roomObjectsData[this.id].store[resourceType];
+    }
+    if (SystemStore.roomObjectsData[this.id].store[resourceType] < amount) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+
+    Intents.set(this.id, "drop", { amount, resourceType });
+    return C.OK;
+  }
+
+  pickup(target) {
+    if (!this.exists) {
+      return;
+    }
+
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (!target || !target.id || !(target instanceof Resource)) {
+      return C.ERR_INVALID_TARGET;
+    }
+    if (
+      sumObjectValues(SystemStore.roomObjectsData[this.id].store) >= SystemStore.roomObjectsData[this.id].storeCapacity
+    ) {
+      return C.ERR_FULL;
+    }
+    if (this.getRangeTo(target) > 1) {
+      return C.ERR_NOT_IN_RANGE;
+    }
+
+    Intents.set(this.id, "pickup", { id: target.id });
+    return C.OK;
+  }
+
+  build(target) {
+    if (!this.exists) {
+      return;
+    }
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+    if (this.spawning) {
+      return C.ERR_BUSY;
+    }
+    if (!this.body.some(p => p.type === C.WORK && p.hits > 0)) {
+      return C.ERR_NO_BODYPART;
+    }
+    if (!this.store.energy) {
+      return C.ERR_NOT_ENOUGH_RESOURCES;
+    }
+    if (!target || !target.id || !(target instanceof ConstructionSite)) {
+      return C.ERR_INVALID_TARGET;
+    }
+    if (this.getRangeTo(target) > 3) {
+      return C.ERR_NOT_IN_RANGE;
+    }
+
+    const objectsInTile = [];
+    const creepsInTile = [];
+
+    SystemStore.roomObjects.forEach(obj => {
+      if (obj.x == target.x && obj.y == target.y && C.OBSTACLE_OBJECT_TYPES.includes(obj.type)) {
+        if (obj.type == "creep") {
+          creepsInTile.push(obj);
+        } else {
+          objectsInTile.push(obj);
+        }
+      }
+    });
+    if (C.OBSTACLE_OBJECT_TYPES.includes(C.STRUCTURE_PROTOTYPES[target.structurePrototypeName])) {
+      if (objectsInTile.length > 0) {
+        return C.ERR_INVALID_TARGET;
+      }
+      if (creepsInTile.length > 0) {
+        return C.ERR_INVALID_TARGET;
+      }
+    }
+
+    Intents.set(this.id, "build", { id: target.id, x: target.x, y: target.y });
+    return C.OK;
+  }
 }
+export const DISMANTLE_COST = 0.005;
+export const DISMANTLE_POWER = 50;
 export const ERR_BUSY = -4;
 export const ERR_FULL = -8;
 export const ERR_INVALID_ARGS = -10;
@@ -278,6 +585,8 @@ export const ERR_NOT_OWNER = -1;
 export const ERR_NO_BODYPART = -12;
 export const ERR_NO_PATH = -2;
 export const ERR_TIRED = -11;
+export const EXTENSION_ENERGY_CAPACITY = 50;
+export const EXTENSION_HITS = 100;
 export class Flag extends RoomObject {
   get my() {
     if (!this.exists) {
@@ -295,11 +604,14 @@ export class Flag extends RoomObject {
     });
   }
 }
+export const HARVEST_POWER = 2;
 export const HEAL = "heal";
 export const HEAL_POWER = 12;
 export const LEFT = 7;
+export const MAX_CONSTRUCTION_SITES = 10;
+export const MAX_CREEP_SIZE = 50;
 export const MOVE = "move";
-export const OBSTACLE_OBJECT_TYPES = ["creep", "tower", "constructedWall"];
+export const OBSTACLE_OBJECT_TYPES = ["creep", "tower", "constructedWall", "spawn", "extension", "link"];
 export const OK = 0;
 export class OwnedStructure extends Structure {
   get my() {
@@ -318,12 +630,40 @@ export class OwnedStructure extends Structure {
     });
   }
 }
+export const RAMPART_HITS = 1;
+export const RAMPART_HITS_MAX = 100000;
 export const RANGED_ATTACK = "ranged_attack";
 export const RANGED_ATTACK_DISTANCE_RATE = { 0: 1, 1: 1, 2: 0.4, 3: 0.1 };
 export const RANGED_ATTACK_POWER = 10;
 export const RANGED_HEAL_POWER = 4;
+export const REPAIR_COST = 0.01;
+export const REPAIR_POWER = 100;
+export const RESOURCES_ALL = ["energy"];
+export const RESOURCE_DECAY = 1000;
+export const RESOURCE_ENERGY = "energy";
 export const RIGHT = 3;
+export const ROAD_HITS = 500;
 export const ROAD_WEAROUT = 1;
+export class Resource extends RoomObject {
+  get amount() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id][SystemStore.roomObjectsData[this.id].resourceType];
+  }
+  get resourceType() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].resourceType;
+  }
+  toJSON() {
+    return Object.assign(super.toJSON(), {
+      amount: this.amount,
+      resourceType: this.resourceType
+    });
+  }
+}
 export class RoomObject {
   constructor(id) {
     if (id) {
@@ -354,7 +694,23 @@ export class RoomObject {
   }
 
   findPathTo(pos, opts) {
-    return findPath(this, pos, opts);
+    return utils.findPath(this, pos, opts);
+  }
+
+  findInRange(positions, range) {
+    return utils.findInRange(this, positions, range);
+  }
+
+  findClosestByRange(positions) {
+    return utils.findClosestByRange(this, positions);
+  }
+
+  findClosestByPath(positions, opts) {
+    return utils.findClosestByPath(this, positions, opts);
+  }
+
+  getRangeTo(pos) {
+    return utils.getRange(this, pos);
   }
 
   toJSON() {
@@ -363,6 +719,36 @@ export class RoomObject {
       x: this.x,
       y: this.y
     };
+  }
+}
+export const SOURCE_ENERGY_REGEN = 10;
+export const STRUCTURE_PROTOTYPES = {
+  StructureTower: "tower",
+  StructureSpawn: "spawn",
+  StructureRoad: "road",
+  StructureRampart: "rampart",
+  StructureExtension: "extension",
+  StructureWall: "constructedWall",
+  StructureContainer: "container"
+};
+export class Source extends RoomObject {
+  get energy() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].energy;
+  }
+  get energyCapacity() {
+    if (!this.exists) {
+      return;
+    }
+    return SystemStore.roomObjectsData[this.id].energyCapacity;
+  }
+  toJSON() {
+    return Object.assign(super.toJSON(), {
+      energy: this.energy,
+      energyCapacity: this.energyCapacity
+    });
   }
 }
 export class Structure extends RoomObject {
@@ -387,8 +773,48 @@ export class Structure extends RoomObject {
     });
   }
 }
+export class StructureContainer extends OwnedStructure {
+  get store() {
+    return new Store(SystemStore.roomObjectsData[this.id]);
+  }
+}
+export class StructureExtension extends OwnedStructure {
+  get store() {
+    return new Store(SystemStore.roomObjectsData[this.id]);
+  }
+}
+export class StructureRampart extends OwnedStructure {}
 export class StructureSpawn extends OwnedStructure {
+  get store() {
+    return new Store(SystemStore.roomObjectsData[this.id]);
+  }
+
   spawnCreep(body) {
+    if (!this.my) {
+      return C.ERR_NOT_OWNER;
+    }
+
+    if (SystemStore.roomObjectsData[this.id].spawning) {
+      return C.ERR_BUSY;
+    }
+
+    if (!body || !Array.isArray(body) || body.length === 0 || body.length > C.MAX_CREEP_SIZE) {
+      return C.ERR_INVALID_ARGS;
+    }
+
+    for (let i = 0; i < body.length; i++) {
+      if (!C.BODYPART_COST[body[i]]) {
+        return C.ERR_INVALID_ARGS;
+      }
+    }
+
+    const energyAvailable = Object.values(SystemStore.roomObjectsData)
+      .filter(i => (i.user === SystemStore.roomObjectsData[this.id].user && i.type == "spawn") || i.type == "extension")
+      .reduce((sum, i) => sum + (i.store.energy || 0), 0);
+    if (energyAvailable < body.reduce((sum, i) => sum + C.BODYPART_COST[i], 0)) {
+      return C.ERR_NOT_ENOUGH_ENERGY;
+    }
+
     let creep = new Creep();
     Intents.set(this.id, "spawnCreep", { body, createRequest: getCreateRequest(creep) });
     return creep;
@@ -396,15 +822,7 @@ export class StructureSpawn extends OwnedStructure {
 }
 export class StructureTower extends OwnedStructure {
   get store() {
-    if (!this.exists) {
-      return;
-    }
-    return {
-      energy: SystemStore.roomObjectsData[this.id].store.energy,
-      getCapacity() {
-        return SystemStore.roomObjectsData[this.id].storeCapacityResource.energy;
-      }
-    };
+    return new Store(SystemStore.roomObjectsData[this.id]);
   }
 
   attack(target) {
@@ -456,7 +874,7 @@ export const TOP = 1;
 export const TOP_LEFT = 8;
 export const TOP_RIGHT = 2;
 export const TOUGH = "tough";
-export const TOWER_CAPACITY = 1000;
+export const TOWER_CAPACITY = 50;
 export const TOWER_ENERGY_COST = 10;
 export const TOWER_FALLOFF = 0.75;
 export const TOWER_FALLOFF_RANGE = 20;
@@ -466,16 +884,29 @@ export const TOWER_POWER_ATTACK = 600;
 export const TOWER_POWER_HEAL = 400;
 export const TOWER_POWER_REPAIR = 800;
 export const TOWER_RANGE = 50;
+export const WALL_HITS = 1;
+export const WALL_HITS_MAX = 100000;
+export const WORK = "work";
 export const arenaInfo = { name: "Capture the Flag", level: 1, season: "alpha" };
 export const constants = {
   ATTACK: "attack",
   ATTACK_POWER: 30,
+  BODYPART_COST: { move: 50, work: 100, attack: 80, carry: 50, heal: 250, ranged_attack: 150, tough: 10 },
   BODYPART_HITS: 100,
   BOTTOM: 5,
   BOTTOM_LEFT: 6,
   BOTTOM_RIGHT: 4,
+  BUILD_POWER: 5,
   CARRY: "carry",
   CARRY_CAPACITY: 50,
+  CONSTRUCTION_COST: { StructureTower: 5000, StructureExtension: 300 },
+  CONSTRUCTION_COST_ROAD_SWAMP_RATIO: 5,
+  CONSTRUCTION_COST_ROAD_WALL_RATIO: 150,
+  CONTAINER_CAPACITY: 2000,
+  CONTAINER_HITS: 300,
+  CREEP_SPAWN_TIME: 3,
+  DISMANTLE_COST: 0.005,
+  DISMANTLE_POWER: 50,
   ERR_BUSY: -4,
   ERR_FULL: -8,
   ERR_INVALID_ARGS: -10,
@@ -490,25 +921,48 @@ export const constants = {
   ERR_NO_BODYPART: -12,
   ERR_NO_PATH: -2,
   ERR_TIRED: -11,
+  EXTENSION_ENERGY_CAPACITY: 50,
+  EXTENSION_HITS: 100,
+  HARVEST_POWER: 2,
   HEAL: "heal",
   HEAL_POWER: 12,
   LEFT: 7,
+  MAX_CONSTRUCTION_SITES: 10,
+  MAX_CREEP_SIZE: 50,
   MOVE: "move",
-  OBSTACLE_OBJECT_TYPES: ["creep", "tower", "constructedWall"],
+  OBSTACLE_OBJECT_TYPES: ["creep", "tower", "constructedWall", "spawn", "extension", "link"],
   OK: 0,
+  RAMPART_HITS: 1,
+  RAMPART_HITS_MAX: 100000,
   RANGED_ATTACK: "ranged_attack",
   RANGED_ATTACK_DISTANCE_RATE: { 0: 1, 1: 1, 2: 0.4, 3: 0.1 },
   RANGED_ATTACK_POWER: 10,
   RANGED_HEAL_POWER: 4,
+  REPAIR_COST: 0.01,
+  REPAIR_POWER: 100,
+  RESOURCES_ALL: ["energy"],
+  RESOURCE_DECAY: 1000,
+  RESOURCE_ENERGY: "energy",
   RIGHT: 3,
+  ROAD_HITS: 500,
   ROAD_WEAROUT: 1,
+  SOURCE_ENERGY_REGEN: 10,
+  STRUCTURE_PROTOTYPES: {
+    StructureTower: "tower",
+    StructureSpawn: "spawn",
+    StructureRoad: "road",
+    StructureRampart: "rampart",
+    StructureExtension: "extension",
+    StructureWall: "constructedWall",
+    StructureContainer: "container"
+  },
   TERRAIN_SWAMP: 2,
   TERRAIN_WALL: 1,
   TOP: 1,
   TOP_LEFT: 8,
   TOP_RIGHT: 2,
   TOUGH: "tough",
-  TOWER_CAPACITY: 1000,
+  TOWER_CAPACITY: 50,
   TOWER_ENERGY_COST: 10,
   TOWER_FALLOFF: 0.75,
   TOWER_FALLOFF_RANGE: 20,
@@ -517,32 +971,116 @@ export const constants = {
   TOWER_POWER_ATTACK: 600,
   TOWER_POWER_HEAL: 400,
   TOWER_POWER_REPAIR: 800,
-  TOWER_RANGE: 50
+  TOWER_RANGE: 50,
+  WALL_HITS: 1,
+  WALL_HITS_MAX: 100000,
+  WORK: "work"
 };
+export function createConstructionSite(x, y, structurePrototype) {
+  if (
+    x === undefined ||
+    y === undefined ||
+    x <= 0 ||
+    x >= SystemStore.arenaSize - 1 ||
+    y <= 0 ||
+    y >= SystemStore.arenaSize - 1
+  ) {
+    return C.ERR_INVALID_ARGS;
+  }
+  if (!Object.values(prototypes).includes(structurePrototype)) {
+    return C.ERR_INVALID_ARGS;
+  }
+  if (!C.CONSTRUCTION_COST[structurePrototype.prototype.constructor.name]) {
+    return C.ERR_INVALID_ARGS;
+  }
+  if (
+    !checkConstructionSite(
+      structurePrototype.prototype.constructor.name,
+      x,
+      y,
+      SystemStore.roomObjects,
+      SystemStore.terrain,
+      SystemStore.arenaSize
+    )
+  ) {
+    return C.ERR_INVALID_TARGET;
+  }
+
+  if (
+    SystemStore.roomObjects.filter(i => i.type === "constructionSite").length + SystemStore.createdConstructionSites >=
+    C.MAX_CONSTRUCTION_SITES
+  ) {
+    return C.ERR_FULL;
+  }
+
+  SystemStore.createdConstructionSites++;
+
+  let site = new prototypes.ConstructionSite();
+  Intents.pushByName("global", "createConstructionSite", {
+    x,
+    y,
+    structurePrototypeName: structurePrototype.prototype.constructor.name,
+    createRequest: getCreateRequest(site)
+  });
+
+  return site;
+}
+export function findClosestByPath(fromPos, positions, opts = {}) {
+  if (!positions || !positions.length) {
+    return null;
+  }
+
+  const objectOnSquare = positions.find(pos => fromPos.x === pos.x && fromPos.y === pos.y);
+  if (objectOnSquare) {
+    return objectOnSquare;
+  }
+
+  const goals = positions.map(i => ({ range: 1, pos: i }));
+
+  if (!opts.costMatrix) {
+    opts.costMatrix = createCostMatrix(opts);
+  }
+
+  const ret = searchPath(fromPos, goals, opts);
+
+  let result = null;
+  let lastPos = fromPos;
+
+  if (ret.path.length) {
+    lastPos = ret.path[ret.path.length - 1];
+  }
+
+  positions.forEach(obj => {
+    if (getRange(lastPos, obj) <= 1) {
+      result = obj;
+    }
+  });
+
+  return result;
+}
+export function findClosestByRange(fromPos, positions) {
+  let closest = null;
+  let minRange = Infinity;
+
+  positions.forEach(i => {
+    if (i.x === undefined || i.y === undefined) {
+      return;
+    }
+    const range = getDistance(fromPos, i);
+    if (range < minRange) {
+      minRange = range;
+      closest = i;
+    }
+  });
+
+  return closest;
+}
+export function findInRange(fromPos, positions, range) {
+  return positions.filter(i => getRange(fromPos, i) <= range);
+}
 export function findPath(fromPos, toPos, opts = {}) {
   if (!opts.costMatrix) {
-    opts.costMatrix = new CostMatrix();
-    const ignore = [];
-    if (opts.ignore) {
-      for (const obj of opts.ignore) {
-        if (obj.id) {
-          ignore.push({ id: obj.id });
-          continue;
-        }
-        if (obj.x !== undefined && obj.y !== undefined) {
-          ignore.push({ x: obj.x, y: obj.y });
-          continue;
-        }
-      }
-    }
-    function block(obj) {
-      if (!ignore.some(o => o._id == obj.id || (o.x == obj.x && o.y == obj.y))) {
-        opts.costMatrix.set(obj.x, obj.y, 255);
-      }
-    }
-    getObjectsByPrototype(Creep).forEach(block);
-    getObjectsByPrototype(StructureTower).forEach(block);
-    getObjectsByPrototype(StructureWall).forEach(block);
+    opts.costMatrix = createCostMatrix(opts);
   }
   const result = searchPath(fromPos, { range: Math.max(1, opts.range || 0), pos: toPos }, opts);
   if (
@@ -586,7 +1124,7 @@ export function getDirection(dx, dy) {
   }
 }
 export function getDistance(a, b) {
-  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+  return getRange(a, b);
 }
 export function getHeapStatistics() {
   return SystemStore.isolate.getHeapStatisticsSync();
@@ -599,6 +1137,9 @@ export function getObjects() {
 }
 export function getObjectsByPrototype(prototype) {
   return Array.from(SystemStore.roomObjectsByPrototype.get(prototype) || []);
+}
+export function getRange(a, b) {
+  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
 }
 export function getTerrainAt({ x, y }) {
   const value = SystemStore.terrain[y * SystemStore.arenaSize + x];
@@ -615,7 +1156,7 @@ export function searchPath(origin, goal, options) {
   let plainCost = Math.min(254, Math.max(1, options.plainCost | 0 || 1));
   let swampCost = Math.min(254, Math.max(1, options.swampCost | 0 || 5));
   let heuristicWeight = Math.min(9, Math.max(1, options.heuristicWeight || 1.2));
-  let maxOps = Math.max(1, options.maxOps | 0 || 50000);
+  let maxOps = Math.max(1, options.maxOps | 0 || 10000);
   let maxCost = Math.max(1, options.maxCost | 0 || 0xffffffff);
   let flee = !!options.flee;
 
